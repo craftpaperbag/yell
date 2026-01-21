@@ -240,17 +240,38 @@ def logger_node(state: AgentState):
     
     # ログ書き出し
     with open(filename, 'w', encoding='utf-8') as f:
+        # ヘッダー
         f.write("=== Midnight Partner Log ===\n")
         f.write(f"Date: {datetime.datetime.now()}\n")
         f.write(f"Type: {state.get('input_type')}\n\n")
-        f.write("--- Analysis ---\n")
-        f.write(f"{state.get('analysis_summary')}\n\n")
-        f.write("--- Final Plan ---\n")
-        # メッセージ履歴から最後のAI発言（決定したプラン）を探す、または current_plan を使う
-        plan = state.get('current_plan', 'No plan recorded')
+        
+        # 1. 分析サマリー
+        f.write("----------------------------------------\n")
+        f.write("📊 Analysis Result (今日の成果)\n")
+        f.write("----------------------------------------\n")
+        f.write(f"{state.get('analysis_summary', 'N/A')}\n\n")
+        
+        # 2. 会話履歴（ここを全部出す！）
+        f.write("----------------------------------------\n")
+        f.write("💬 Conversation History (親友との対話)\n")
+        f.write("----------------------------------------\n")
+        
+        for msg in state['messages']:
+            if isinstance(msg, HumanMessage):
+                f.write(f"\n👤 あなた:\n{msg.content}\n")
+            elif isinstance(msg, AIMessage):
+                f.write(f"\n🧸 クマちゃん:\n{msg.content}\n")
+        
+        f.write("\n")
+
+        # 3. 最終プラン
+        f.write("----------------------------------------\n")
+        f.write("📝 Final Plan (明日への約束)\n")
+        f.write("----------------------------------------\n")
+        plan = state.get('current_plan', '（作戦は立てられませんでした）')
         f.write(f"{plan}\n")
     
-    print(f"\n✅ 会話の記録を {filename} に置いておいたよ。おやすみ。")
+    print(f"\n✅ 会話の全記録を {filename} に置いておいたよ。\n   今日のことはもう忘れて、ゆっくり休んでね。おやすみ。")
     return {}
 
 # ==========================================
@@ -278,7 +299,7 @@ workflow.add_node("analyzer", analyzer_node)
 workflow.add_node("praiser", praiser_node)
 workflow.add_node("strategist", strategist_node)
 workflow.add_node("cheer", cheer_node)
-workflow.add_node("logger", logger_node) # 復活！
+workflow.add_node("logger", logger_node) 
 
 workflow.set_entry_point("input")
 
@@ -307,7 +328,6 @@ workflow.add_conditional_edges(
     }
 )
 
-# 最後にログ保存へ
 workflow.add_edge("cheer", "logger")
 workflow.add_edge("logger", END)
 
