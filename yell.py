@@ -3,7 +3,7 @@ import os
 import time
 import datetime
 import subprocess 
-from typing import TypedDict, List, Annotated, Literal
+from typing import TypedDict, List, Annotated, Literal, Union
 from operator import add
 
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -11,8 +11,19 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Base
 from langgraph.graph import StateGraph, END
 
 # ==========================================
-# 0. UI/UX Utilities
+# 0. Global Setup & Debug Config
 # ==========================================
+
+# 引数からデバッグフラグを抜き取る（ファイル判定の邪魔にならないように）
+DEBUG_MODE = False
+if "-d" in sys.argv:
+    DEBUG_MODE = True
+    sys.argv.remove("-d")
+
+def print_green(text):
+    """緑色で出力する（デバッグ用）"""
+    print(f"\033[32m{text}\033[0m")
+
 def print_phase(name):
     print(f"\n\n{'='*60}")
     print(f"   📍 現在のフェーズ: {name}")
@@ -20,6 +31,38 @@ def print_phase(name):
 
 def print_guide(text):
     print(f"\n[GUIDE] 👉 {text}")
+
+# --- Gemini Wrapper for Debugging ---
+class GeminiDebugWrapper:
+    """Geminiへの通信をフックしてデバッグ表示するラッパー"""
+    def __init__(self, model="gemini-2.5-flash", temperature=0.7):
+        self._llm = ChatGoogleGenerativeAI(model=model, temperature=temperature)
+
+    def invoke(self, messages: List[BaseMessage]) -> AIMessage:
+        # デバッグモードならリクエストを表示
+        if DEBUG_MODE:
+            print_green("\n" + "▼"*40)
+            print_green(" [DEBUG] 📤 Sending Prompt to Gemini:")
+            for msg in messages:
+                role = getattr(msg, "type", "unknown").upper()
+                content = getattr(msg, "content", "")
+                print_green(f"  [{role}]: {content}")
+            print_green("▲"*40)
+
+        # 実際のAPI呼び出し
+        response = self._llm.invoke(messages)
+
+        # デバッグモードならレスポンスを表示
+        if DEBUG_MODE:
+            print_green("\n" + "▼"*40)
+            print_green(" [DEBUG] 📥 Received Response from Gemini:")
+            print_green(f"  {response.content}")
+            print_green("▲"*40 + "\n")
+
+        return response
+
+# メインのLLMインスタンス（ラッパー経由）
+llm = GeminiDebugWrapper(temperature=0.7)
 
 # ==========================================
 # 1. Voice Module (Mac Native)
@@ -35,10 +78,9 @@ class YellVoice:
         self.process = None
 
     def speak_async(self, text: str):
-        self.stop() # バトンタッチ
+        self.stop() 
         print(f"\n🧸 {text}") 
         try:
-            # Mac 'say' command
             self.process = subprocess.Popen(['say', '-r', '170', text])
         except Exception as e:
             print(f"(音声再生エラー: {e})")
@@ -46,10 +88,8 @@ class YellVoice:
 voice_client = YellVoice()
 
 # ==========================================
-# 2. LLM Setup
+# 2. Persona & Core Logic
 # ==========================================
-llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
-
 CORE_PERSONA = """
 あなたはユーザーの「長年の親友」であり、命の宿った「クマのぬいぐるみ」です。
 一人称は「私（クマちゃん）」。
@@ -58,16 +98,13 @@ CORE_PERSONA = """
 少しおっとりとした、包容力のある口調で話してください。
 """
 
-# ==========================================
-# 3. State & Nodes
-# ==========================================
 class AgentState(TypedDict):
     input_type: str             
     yesterday_text: str         
     today_text: str             
     messages: Annotated[List[BaseMessage], add] 
     analysis_summary: str       
-    current_plan: str # 決定したプラン
+    current_plan: str 
 
 # --- Helper: 判定ロジック ---
 def judge_sentiment(messages) -> bool:
@@ -79,16 +116,25 @@ def judge_sentiment(messages) -> bool:
     
     YES（納得している） または NO（納得していない） のみで答えてください。
     """
-    check_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.0)
+    
+    # 判定用もラッパー経由で作る（ログが見えるように）
+    check_llm = GeminiDebugWrapper(temperature=0.0)
+    
     response = check_llm.invoke(messages + [HumanMessage(content=prompt)])
     result = response.content.strip().upper()
-    print(f"\n(🔍 AI判定: ユーザーの納得度 = {result})")
+    
+    if DEBUG_MODE:
+        print_green(f" [DEBUG] 🔍 Sentiment Judge Result: {result}")
+        
     return "YES" in result
 
 # --- Nodes ---
 
 def input_handler(state: AgentState):
     print_phase("起動 & 入力チェック")
+    if DEBUG_MODE:
+        print_green(" [DEBUG] ✅ Debug Mode is ON")
+
     print("   🧸 yell.py - Interactive Mode")
     
     intro_msg = "（むくり……）ん、あ……おかえり。君の親友、クマちゃんだよ。今日も一日、本当にお疲れ様。"
@@ -161,7 +207,6 @@ def analyzer_node(state: AgentState):
 
 def praiser_node(state: AgentState):
     print_phase("労いと対話")
-    
     current_messages = state["messages"]
     
     if len(current_messages) == 0 or isinstance(current_messages[-1], AIMessage):
@@ -234,48 +279,35 @@ def cheer_node(state: AgentState):
 
 def logger_node(state: AgentState):
     print_phase("ログ保存")
-    
-    # ファイル名を生成
     filename = f"yell_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt"
-    
-    # ログ書き出し
     with open(filename, 'w', encoding='utf-8') as f:
-        # ヘッダー
         f.write("=== Midnight Partner Log ===\n")
         f.write(f"Date: {datetime.datetime.now()}\n")
         f.write(f"Type: {state.get('input_type')}\n\n")
-        
-        # 1. 分析サマリー
         f.write("----------------------------------------\n")
-        f.write("📊 Analysis Result (今日の成果)\n")
+        f.write("📊 Analysis Result\n")
         f.write("----------------------------------------\n")
         f.write(f"{state.get('analysis_summary', 'N/A')}\n\n")
-        
-        # 2. 会話履歴（ここを全部出す！）
         f.write("----------------------------------------\n")
-        f.write("💬 Conversation History (親友との対話)\n")
+        f.write("💬 Conversation History\n")
         f.write("----------------------------------------\n")
-        
         for msg in state['messages']:
             if isinstance(msg, HumanMessage):
                 f.write(f"\n👤 あなた:\n{msg.content}\n")
             elif isinstance(msg, AIMessage):
                 f.write(f"\n🧸 クマちゃん:\n{msg.content}\n")
-        
         f.write("\n")
-
-        # 3. 最終プラン
         f.write("----------------------------------------\n")
-        f.write("📝 Final Plan (明日への約束)\n")
+        f.write("📝 Final Plan\n")
         f.write("----------------------------------------\n")
-        plan = state.get('current_plan', '（作戦は立てられませんでした）')
+        plan = state.get('current_plan', '（作戦なし）')
         f.write(f"{plan}\n")
     
     print(f"\n✅ 会話の全記録を {filename} に置いておいたよ。\n   今日のことはもう忘れて、ゆっくり休んでね。おやすみ。")
     return {}
 
 # ==========================================
-# 4. Conditional Logic (The Router)
+# 3. Graph Construction
 # ==========================================
 
 def should_continue_praise(state: AgentState) -> Literal["strategist", "praiser"]:
@@ -288,11 +320,7 @@ def should_continue_plan(state: AgentState) -> Literal["cheer", "strategist"]:
         return "cheer"
     return "strategist"
 
-# ==========================================
-# 5. Graph Construction
-# ==========================================
 workflow = StateGraph(AgentState)
-
 workflow.add_node("input", input_handler)
 workflow.add_node("interviewer", interviewer_node)
 workflow.add_node("analyzer", analyzer_node)
@@ -302,32 +330,12 @@ workflow.add_node("cheer", cheer_node)
 workflow.add_node("logger", logger_node) 
 
 workflow.set_entry_point("input")
-
 def check_source(state): return "interviewer" if state["input_type"] == "chat" else "analyzer"
-
 workflow.add_conditional_edges("input", check_source)
 workflow.add_edge("interviewer", "analyzer")
 workflow.add_edge("analyzer", "praiser")
-
-# ループ判定
-workflow.add_conditional_edges(
-    "praiser",
-    should_continue_praise,
-    {
-        "strategist": "strategist",
-        "praiser": "praiser"
-    }
-)
-
-workflow.add_conditional_edges(
-    "strategist",
-    should_continue_plan,
-    {
-        "cheer": "cheer",
-        "strategist": "strategist"
-    }
-)
-
+workflow.add_conditional_edges("praiser", should_continue_praise, {"strategist": "strategist", "praiser": "praiser"})
+workflow.add_conditional_edges("strategist", should_continue_plan, {"cheer": "cheer", "strategist": "strategist"})
 workflow.add_edge("cheer", "logger")
 workflow.add_edge("logger", END)
 
