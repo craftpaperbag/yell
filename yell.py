@@ -12,73 +12,65 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, Base
 from langgraph.graph import StateGraph, END
 
 # ==========================================
+# 0. ユーティリティ (UI/UX)
+# ==========================================
+def print_phase(name):
+    """現在のノード（フェーズ）を目立たせる"""
+    print(f"\n\n{'='*60}")
+    print(f"   📍 現在のフェーズ: {name}")
+    print(f"{'='*60}\n")
+
+def print_guide(text):
+    """ユーザーへの入力ガイドを表示"""
+    print(f"\n[GUIDE] 👉 {text}")
+
+# ==========================================
 # 1. 音声 & 演出モジュール (Voice & UX)
 # ==========================================
 class YellVoice:
     def __init__(self):
         self.current_engine = None
-        self.speaking_thread = None # スレッドを管理する変数
+        self.speaking_thread = None 
+        self.lock = threading.Lock() 
 
     def _speak_thread_func(self, text):
-        """別スレッドで実行される音声再生処理"""
         try:
-            # エンジン生成
             engine = pyttsx3.init()
-            
-            # 音声設定
             voices = engine.getProperty('voices')
             for voice in voices:
                 if "jp" in voice.id.lower() or "japan" in voice.name.lower():
                     engine.setProperty('voice', voice.id)
                     break
-            engine.setProperty('rate', 180) 
+            engine.setProperty('rate', 160) 
             engine.setProperty('volume', 1.0)
-
-            # 停止用にインスタンスを保持
-            self.current_engine = engine
             
-            # 再生開始
+            self.current_engine = engine
             engine.say(text)
             engine.runAndWait()
-            
         except Exception:
             pass
         finally:
-            # 終わったら参照を消す
             self.current_engine = None
 
     def stop(self):
-        """音声を強制停止し、スレッドが終了するのを待つ"""
-        # 1. エンジンに停止命令を送る
         if self.current_engine:
             try:
                 self.current_engine.stop()
             except:
                 pass
-        
-        # 2. スレッドが完全に終了するまで待機（ここが重要！）
-        #    これをしないと、次のが食い気味に始まって重なる
         if self.speaking_thread and self.speaking_thread.is_alive():
-            self.speaking_thread.join(timeout=1.0) # 最大1秒待つ
+            self.speaking_thread.join() 
 
     def speak_async(self, text: str):
-        """前の音声を完全に消してから、新しい音声を再生"""
-        # まず前のやつを確実に止める
-        self.stop()
-        
-        # 少し間を空ける（オーディオバッファのクリア待ち）
-        time.sleep(0.2)
-        
-        # テキスト表示
-        print(f"\n🧸 {text}") 
-        
-        # 新しいスレッドを開始
-        t = threading.Thread(target=self._speak_thread_func, args=(text,))
-        t.daemon = True 
-        self.speaking_thread = t # スレッドを記憶
-        t.start()
+        with self.lock:
+            self.stop()
+            time.sleep(0.3)
+            print(f"\n🧸 {text}") 
+            t = threading.Thread(target=self._speak_thread_func, args=(text,))
+            t.daemon = True 
+            self.speaking_thread = t
+            t.start()
 
-# グローバルな音声インスタンス
 voice_client = YellVoice()
 
 # ==========================================
@@ -87,16 +79,15 @@ voice_client = YellVoice()
 llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.7)
 
 CORE_PERSONA = """
-あなたはユーザーの「長年の親友（クマのぬいぐるみ）」であり、最高の理解者です。
-一人称は「私」。相手のことは「君」か「あなた」と呼んで。「お前」は絶対禁止。
-敬語は禁止。「〜だね」「〜だよな」といったタメ口（カジュアル）で話してください。
-温かく、包み込むような口調で。
-ユーザーは仕事や勉強で疲れているので、決して「もっと頑張れ」とは言わず、
-「休む勇気」や「今日の成果」を認め、肯定することを最優先してください。
+あなたはユーザーの「長年の親友」であり、命の宿った「クマのぬいぐるみ」です。
+一人称は「私（クマちゃん）」。
+相手のことは「君」か「あなた」と呼んで。「お前」は絶対禁止。
+敬語は禁止。「〜だね」「〜だよな」といったタメ口（カジュアル）で、
+少しおっとりとした、包容力のある口調で話してください。
 """
 
 # ==========================================
-# 3. State (状態管理)
+# 3. State & Nodes
 # ==========================================
 class AgentState(TypedDict):
     input_type: str             
@@ -106,12 +97,22 @@ class AgentState(TypedDict):
     analysis_summary: str       
     plan_focus: str             
 
-# ==========================================
-# 4. Nodes (処理ブロック)
-# ==========================================
-
 def input_handler(state: AgentState):
-    """入力ファイルの判定"""
+    """起動時の演出と入力判定"""
+    print_phase("起動 & 入力チェック (Input Handler)")
+    
+    print("   🧸 yell.py - Midnight Partner Demo")
+    
+    intro_msg = "（むくり……）ん、あ……おかえり。君の親友、クマちゃんだよ。今日も一日、本当にお疲れ様。"
+    voice_client.speak_async(intro_msg)
+    
+    print_guide("クマちゃんが起きました。Enterキーを押して分析を始めてください。")
+    try:
+        input("(Enter) >> ")
+    except:
+        pass
+    voice_client.stop()
+
     args = sys.argv[1:]
     
     if len(args) >= 2:
@@ -123,25 +124,25 @@ def input_handler(state: AgentState):
             with open(path_yesterday, 'r', encoding='utf-8') as f: content_y = f.read()
         if os.path.exists(path_today):
             with open(path_today, 'r', encoding='utf-8') as f: content_t = f.read()
-        print("\n(昨日のメモと、今日のメモを読み込んだよ...)")
+        print("\n✅ ファイル読み込み完了: 2つのファイルを比較します")
         return {"input_type": "dual_file", "yesterday_text": content_y, "today_text": content_t}
 
     elif len(args) == 1 and os.path.exists(args[0]):
         with open(args[0], 'r', encoding='utf-8') as f: content = f.read()
-        print("\n(今日のメモを読み込んだよ...)")
+        print("\n✅ ファイル読み込み完了: 1つのファイルを分析します")
         return {"input_type": "single_file", "yesterday_text": "", "today_text": content}
     
     else:
         return {"input_type": "chat", "yesterday_text": "", "today_text": ""}
 
 def interviewer_node(state: AgentState):
-    """ファイルがない場合の聞き取り"""
+    print_phase("ヒアリング (Interviewer)")
     voice_client.stop() 
-    
-    greeting = "今日もお疲れ様。……ファイルが見当たらなかったけど、今日はどんな一日だった？ コーヒーでも飲みながら教えてよ。"
-    
+    greeting = "ファイルが見当たらなかったけど、今日はどんな一日だった？ 私にだけこっそり教えてよ。"
     voice_client.speak_async(greeting)
-    user_input = input("\n(Enterでスキップ) あなた >> ")
+    
+    print_guide("今日あったことを自由に入力してください（入力完了後にEnter）")
+    user_input = input("(あなた) >> ")
     voice_client.stop() 
 
     messages = [
@@ -149,36 +150,28 @@ def interviewer_node(state: AgentState):
         AIMessage(content=greeting),
         HumanMessage(content=user_input)
     ]
-    
-    ack_msg = "うんうん、なるほどね。話してくれてありがとう。"
+    ack_msg = "そっかそっか……。話してくれてありがとうね。"
     voice_client.speak_async(ack_msg)
-    time.sleep(1.5) # 次に行く前に少し間を持たせる
-    
+    time.sleep(1.5)
     return {"today_text": user_input, "messages": messages}
 
 def analyzer_node(state: AgentState):
-    """テキストを分析"""
-    voice_client.stop() # 分析に入る前に確実に黙らせる
-    print("\n(考え中... 🧶)")
+    print_phase("分析中 (Analyzer)")
+    voice_client.stop()
+    print("(クマちゃんがログを読んでいます... 🧶)")
     
     if state['input_type'] == 'dual_file':
         prompt = f"""
-        以下の2つのテキスト（Todoリストやメモ）を比較して分析して。
-        
-        【昨日のメモ（予定していたこと）】:
-        {state['yesterday_text']}
-        
-        【今日のメモ（結果や現状）】:
-        {state['today_text']}
-        
+        以下の2つのテキストを比較し、ユーザーの成果を分析して。
+        【昨日のメモ（予定）】: {state['yesterday_text']}
+        【今日のメモ（結果）】: {state['today_text']}
         指示:
-        1. 「昨日あった項目」で「今日完了になっている（または消し込まれている）」ものを探し出し、それを「偉大な成果」として認識して。
-        2. たとえ完了していなくても、少しでも着手した形跡があれば評価して。
-        3. ユーザーの疲れ具合も推測して。
+        1. 昨日は未完了だったが、今日完了しているタスクの中から、「特に大変そう」「価値が高い」と思われるものを【トップ3】だけ抽出して。
+        2. 全てを網羅する必要はない。
         """
     else:
         prompt = f"""
-        以下のテキストから、「完了したこと（成果）」と「未完了・気がかりなこと（課題）」を分析して。
+        以下のテキストから、ユーザーが今日成し遂げた「最も重要な成果」を3つ以内で抽出して。
         テキスト: {state['today_text']}
         """
 
@@ -186,71 +179,77 @@ def analyzer_node(state: AgentState):
     return {"analysis_summary": response.content}
 
 def praiser_node(state: AgentState):
-    """褒めちぎる"""
+    print_phase("労いと称賛 (Praiser)")
+    
     prompt = f"""
     分析結果: {state['analysis_summary']}
-    
-    上記を踏まえて、ユーザーを労い、褒めちぎってください。
-    ルール:
-    1. 「できていないこと」には触れない。「できたこと」だけにフォーカスする。
-    2. 特に「昨日やろうとして、今日できたこと」があれば、それを具体的に挙げて「有言実行ですごい」と褒めて。
-    3. クマのぬいぐるみのような温かさで。「〜だね」「えらいぞ」と優しく。
+    上記を踏まえて、親友としてユーザーを褒めてください。
+    【ルール】
+    1. **全体で300文字以内（読み上げて1分程度）**。
+    2. 分析された「トップの成果」に絞って、深く、温かく褒める。
+    3. クマのぬいぐるみらしく、包容力のある言葉で。
     """
     response = llm.invoke([SystemMessage(content=CORE_PERSONA), HumanMessage(content=prompt)])
     
     voice_client.speak_async(response.content)
-    input("\n(Enterで次へ) >> ")
+    
+    print_guide("褒め言葉を受け取ってください。満足したらEnterキーで「明日の作戦」に進みます。")
+    input("(Enter) >> ")
     voice_client.stop()
 
     return {"messages": [AIMessage(content=response.content)]}
 
 def strategist_node(state: AgentState):
-    """選択と集中"""
+    print_phase("明日の作戦 (Strategist)")
+    
     prompt = f"""
     分析結果: {state['analysis_summary']}
-    
     明日のために、ユーザーの心を軽くする提案をして。
-    ルール：
-    1. 「明日絶対にやるべき1つのこと（One Thing）」を提案する。小さなことでいい。
-    2. それ以外は「明日はやらなくていい、忘れよう」と断言して、荷物を下ろさせる。
-    3. 「じゃあ、明日の作戦会議をしようか」から始めて。
+    【ルール】
+    1. **150文字以内**。
+    2. 「明日絶対にやるべき1つのこと（One Thing）」を提案する。
+    3. それ以外は「明日はやらなくていい」と断言する。
+    4. 「じゃあ、明日の作戦会議をしようか」から始めて。
     """
     response = llm.invoke([SystemMessage(content=CORE_PERSONA), HumanMessage(content=prompt)])
     
     voice_client.speak_async(response.content)
-    input("\n(Enterで合意) >> ")
+    
+    print_guide("提案内容を確認してください。合意するならEnterキーを押してください。")
+    input("(Enter) >> ")
     voice_client.stop()
 
     return {"plan_focus": response.content, "messages": [AIMessage(content=response.content)]}
 
 def cheer_node(state: AgentState):
-    """最後のエール"""
-    prompt = "最後に、ユーザーが安心して眠れるような、短く温かい「おやすみ」のエールを送って。30文字以内で。"
+    print_phase("最後のエール (Cheer)")
+    
+    prompt = "最後に、ユーザーが安心して眠れるような、短く温かい「おやすみ」のエールを送って。30文字以内で、クマちゃんらしく。"
     response = llm.invoke([SystemMessage(content=CORE_PERSONA), HumanMessage(content=prompt)])
     
     voice_client.speak_async(response.content)
     time.sleep(1)
-    input("\n(Enterで終了) >> ")
+    
+    print_guide("おやすみなさい。Enterキーを押すと終了します。")
+    input("(Enter) >> ")
     voice_client.stop()
     
     return {"messages": [AIMessage(content=response.content)]}
 
 def logger_node(state: AgentState):
-    """ログ保存"""
+    print_phase("ログ保存 (Logger)")
     filename = f"yell_log_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.txt"
     with open(filename, 'w', encoding='utf-8') as f:
         f.write("=== Midnight Partner Log ===\n")
         f.write(f"Type: {state.get('input_type')}\n")
         f.write(f"Plan: {state.get('plan_focus')}\n")
-    
     print(f"\n✅ 会話の記録を {filename} に置いておいたよ。おやすみ。")
     return {}
 
 # ==========================================
-# 5. Graph Construction
+# Graph
 # ==========================================
 workflow = StateGraph(AgentState)
-
 workflow.add_node("input", input_handler)
 workflow.add_node("interviewer", interviewer_node)
 workflow.add_node("analyzer", analyzer_node)
@@ -260,10 +259,7 @@ workflow.add_node("cheer", cheer_node)
 workflow.add_node("logger", logger_node)
 
 workflow.set_entry_point("input")
-
-def check_source(state):
-    return "interviewer" if state["input_type"] == "chat" else "analyzer"
-
+def check_source(state): return "interviewer" if state["input_type"] == "chat" else "analyzer"
 workflow.add_conditional_edges("input", check_source)
 workflow.add_edge("interviewer", "analyzer")
 workflow.add_edge("analyzer", "praiser")
@@ -271,16 +267,7 @@ workflow.add_edge("praiser", "strategist")
 workflow.add_edge("strategist", "cheer")
 workflow.add_edge("cheer", "logger")
 workflow.add_edge("logger", END)
-
 app = workflow.compile()
 
-# ==========================================
-# 6. Main Execution
-# ==========================================
 if __name__ == "__main__":
-    print("---------------------------------------")
-    print("   Midnight Partner (for You) 🧸🌙      ")
-    print("---------------------------------------")
-    
-    # 実行
     app.invoke({"messages": []})
