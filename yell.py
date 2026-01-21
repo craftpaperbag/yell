@@ -3,7 +3,7 @@ import os
 import time
 import datetime
 import pyttsx3
-import threading # 並行処理用
+import threading
 from typing import TypedDict, List, Annotated
 from operator import add
 
@@ -17,15 +17,15 @@ from langgraph.graph import StateGraph, END
 class YellVoice:
     def __init__(self):
         self.current_engine = None
-        self.stop_event = False
+        self.speaking_thread = None # スレッドを管理する変数
 
     def _speak_thread_func(self, text):
         """別スレッドで実行される音声再生処理"""
         try:
-            # 毎回新しいエンジンを作る（バグ回避の使い捨て方式）
+            # エンジン生成
             engine = pyttsx3.init()
             
-            # 音声設定（日本語を探す）
+            # 音声設定
             voices = engine.getProperty('voices')
             for voice in voices:
                 if "jp" in voice.id.lower() or "japan" in voice.name.lower():
@@ -37,36 +37,46 @@ class YellVoice:
             # 停止用にインスタンスを保持
             self.current_engine = engine
             
-            # 再生
+            # 再生開始
             engine.say(text)
             engine.runAndWait()
             
         except Exception:
             pass
         finally:
+            # 終わったら参照を消す
             self.current_engine = None
 
-    def speak_async(self, text: str):
-        """タイプライター表示 + 裏で音声読み上げ（ノンブロッキング）"""
-        # 前の音声があれば止める
-        self.stop()
-        
-        # テキスト表示
-        print(f"\n🧸 {text}") 
-        
-        # 音声スレッドを開始
-        t = threading.Thread(target=self._speak_thread_func, args=(text,))
-        t.daemon = True # メインプログラム終了時に道連れにする
-        t.start()
-
     def stop(self):
-        """音声を強制停止する"""
+        """音声を強制停止し、スレッドが終了するのを待つ"""
+        # 1. エンジンに停止命令を送る
         if self.current_engine:
             try:
                 self.current_engine.stop()
             except:
                 pass
-            self.current_engine = None
+        
+        # 2. スレッドが完全に終了するまで待機（ここが重要！）
+        #    これをしないと、次のが食い気味に始まって重なる
+        if self.speaking_thread and self.speaking_thread.is_alive():
+            self.speaking_thread.join(timeout=1.0) # 最大1秒待つ
+
+    def speak_async(self, text: str):
+        """前の音声を完全に消してから、新しい音声を再生"""
+        # まず前のやつを確実に止める
+        self.stop()
+        
+        # 少し間を空ける（オーディオバッファのクリア待ち）
+        time.sleep(0.2)
+        
+        # テキスト表示
+        print(f"\n🧸 {text}") 
+        
+        # 新しいスレッドを開始
+        t = threading.Thread(target=self._speak_thread_func, args=(text,))
+        t.daemon = True 
+        self.speaking_thread = t # スレッドを記憶
+        t.start()
 
 # グローバルな音声インスタンス
 voice_client = YellVoice()
@@ -126,14 +136,13 @@ def input_handler(state: AgentState):
 
 def interviewer_node(state: AgentState):
     """ファイルがない場合の聞き取り"""
-    voice_client.stop() # 念のため
+    voice_client.stop() 
     
     greeting = "今日もお疲れ様。……ファイルが見当たらなかったけど、今日はどんな一日だった？ コーヒーでも飲みながら教えてよ。"
     
-    # 喋りながら入力を待つ（Enterで中断可能）
     voice_client.speak_async(greeting)
     user_input = input("\n(Enterでスキップ) あなた >> ")
-    voice_client.stop() # 入力確定したら声を止める
+    voice_client.stop() 
 
     messages = [
         SystemMessage(content=CORE_PERSONA),
@@ -143,14 +152,13 @@ def interviewer_node(state: AgentState):
     
     ack_msg = "うんうん、なるほどね。話してくれてありがとう。"
     voice_client.speak_async(ack_msg)
-    # ここは短いからinputいらないけど、間をもたせるため
-    time.sleep(1) 
+    time.sleep(1.5) # 次に行く前に少し間を持たせる
     
     return {"today_text": user_input, "messages": messages}
 
 def analyzer_node(state: AgentState):
     """テキストを分析"""
-    voice_client.stop()
+    voice_client.stop() # 分析に入る前に確実に黙らせる
     print("\n(考え中... 🧶)")
     
     if state['input_type'] == 'dual_file':
@@ -190,10 +198,9 @@ def praiser_node(state: AgentState):
     """
     response = llm.invoke([SystemMessage(content=CORE_PERSONA), HumanMessage(content=prompt)])
     
-    # 喋りながら待機
     voice_client.speak_async(response.content)
     input("\n(Enterで次へ) >> ")
-    voice_client.stop() # Enterで止める
+    voice_client.stop()
 
     return {"messages": [AIMessage(content=response.content)]}
 
@@ -222,7 +229,6 @@ def cheer_node(state: AgentState):
     response = llm.invoke([SystemMessage(content=CORE_PERSONA), HumanMessage(content=prompt)])
     
     voice_client.speak_async(response.content)
-    # 最後は少し待ってから終了（あるいはEnterで即終了）
     time.sleep(1)
     input("\n(Enterで終了) >> ")
     voice_client.stop()
